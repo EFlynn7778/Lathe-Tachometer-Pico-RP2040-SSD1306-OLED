@@ -21,8 +21,11 @@
 uint8_t screenBuffer[myScreenSize]; // Define a buffer to cover whole screen  128 * 64/8
 
 // Display timing parameters
-#define DISPLAY_UPDATE_INTERVAL 250 // Update display every 250ms
+#define DISPLAY_UPDATE_INTERVAL 100  // Update display every 100ms (was 250ms)
 #define MENU_TIMEOUT 10000          // Exit menu after 10 seconds of inactivity
+#define RPM_TIMEOUT_MS 500          // Timeout for zero RPM (was 3000000us = 3000ms)
+#define RPM_TIMEOUT_CHECK_MS 100    // Check for timeout every 100ms (was 1000ms)
+#define FLASH_PAGE_SIZE   256
 
 // I2C settings
 const uint16_t I2C_Speed = 1000;
@@ -30,7 +33,7 @@ const uint8_t I2C_GPIO_CLK = 7;
 const uint8_t I2C_GPIO_DATA = 6;
 
 // Hall sensor and button settings
-const uint8_t HALL_SENSOR_PIN = 29;    // GPIO pin for hall sensor input
+const uint8_t HALL_SENSOR_PIN = 12;    // GPIO pin for hall sensor input
 const uint8_t BUTTON_UP_PIN = 1;      // GPIO pin for UP button
 const uint8_t BUTTON_DOWN_PIN = 2;    // GPIO pin for DOWN button
 const uint32_t DEBOUNCE_DELAY = 50;    // Button debounce delay (ms)
@@ -102,6 +105,7 @@ void calculate_rpm(void);
 int main() 
 {
     uint32_t last_display_update = 0;
+    uint32_t last_timeout_check = 0;
     
     // Initialize everything
     setup();
@@ -113,13 +117,19 @@ int main()
         // Process button presses
         process_buttons();
         
-        // Calculate RPM periodically
+        // Calculate RPM when new data is available
         if (rpm_data_ready) {
             calculate_rpm();
             rpm_data_ready = false;
         }
         
-        // Update display periodically
+        // Periodically check for RPM timeout (faster checks for more responsive zero)
+        if (current_time - last_timeout_check >= RPM_TIMEOUT_CHECK_MS) {
+            calculate_rpm(); // Will reset RPM to zero if no pulses within timeout period
+            last_timeout_check = current_time;
+        }
+        
+        // Update display periodically (faster updates for more responsive display)
         if (current_time - last_display_update >= DISPLAY_UPDATE_INTERVAL) {
             myOLED.OLEDclearBuffer();
             
@@ -140,7 +150,7 @@ int main()
         }
         
         // Small delay to avoid hogging CPU
-        sleep_ms(10);
+        sleep_ms(5); // Reduced from 10ms for more responsive system
     }
 }
 
@@ -161,10 +171,9 @@ void gpio_callback(uint gpio, uint32_t events) {
             pulse_interval_sum += interval;
             pulse_intervals_count = pulse_intervals_count + 1; // Avoid ++ on volatile
             
-            // When we have enough samples, signal that we can calculate RPM
-            if (pulse_intervals_count >= settings.pulses_per_rev) {
-                rpm_data_ready = true;
-            }
+            // Signal that we can calculate RPM after each pulse for faster response
+            // This is more responsive than waiting for settings.pulses_per_rev pulses
+            rpm_data_ready = true;
         }
     }
     
@@ -356,18 +365,39 @@ void process_buttons() {
 
 // Calculate RPM based on pulse timing
 void calculate_rpm() {
+    // Timeout detection - if no pulses for a set period, set RPM to 0
+    uint64_t current_time = time_us_64();
+    
+    // Store previous RPM for rate-of-change detection
+    float previous_rpm = current_rpm;
+    
+    // If no pulses received for timeout period, set RPM to zero
+    if (current_time - current_pulse_time > RPM_TIMEOUT_MS * 1000) {
+        current_rpm = 0;
+        filtered_rpm = 0;
+
+        // Reset for next calculation
+        pulse_interval_sum = 0;
+        pulse_intervals_count = 0;
+        return; // No need to continue calculation if we've timed out
+    }
+    
+    // Process even if we have just one pulse interval (for faster response)
     if (pulse_intervals_count > 0) {
         // Calculate average pulse interval in microseconds
         uint64_t avg_interval = pulse_interval_sum / pulse_intervals_count;
-        
+
         // Avoid division by zero
         if (avg_interval > 0) {
             // Convert to RPM: 60 seconds * 1,000,000 microseconds / average interval time / pulses per rev
             // Apply gear ratio adjustment
             float new_rpm = (60.0f * 1000000.0f) / avg_interval / settings.pulses_per_rev * settings.gear_ratio;
             
-            // Apply low-pass filter if enabled
-            if (settings.filter_strength > 0) {
+            // Detect rapid deceleration (RPM dropping quickly)
+            bool rapid_deceleration = (previous_rpm > 10.0f && new_rpm < previous_rpm * 0.7f);
+            
+            // Apply low-pass filter if enabled and not rapidly decelerating
+            if (settings.filter_strength > 0 && !rapid_deceleration) {
                 // Calculate filter coefficient (0-1 range)
                 // Higher filter_strength = more filtering (smoother, slower response)
                 float filter_alpha = settings.filter_strength / 10.0f;
@@ -384,7 +414,7 @@ void calculate_rpm() {
                 // Use filtered value
                 current_rpm = filtered_rpm;
             } else {
-                // No filtering
+                // No filtering or rapid deceleration - respond quickly
                 current_rpm = new_rpm;
                 filtered_rpm = new_rpm;
             }
@@ -393,13 +423,6 @@ void calculate_rpm() {
         // Reset for next calculation
         pulse_interval_sum = 0;
         pulse_intervals_count = 0;
-        
-        // Timeout detection - if no pulses for 3 seconds, set RPM to 0
-        uint64_t current_time = time_us_64();
-        if (current_time - current_pulse_time > 3000000) {
-            current_rpm = 0;
-            filtered_rpm = 0;
-        }
     }
 }
 
