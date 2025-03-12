@@ -14,8 +14,8 @@ Sensor can be hall,optical, inductive etc.  Output mut be < 3.3v. If your sensor
 - Real-time RPM measurement and display
 - 128x64 OLED display with large digit readout
 - Configurable settings stored in flash memory:
-  - Number of pulses per revolution (1-66)
-  - Gear ratio adjustment (0.1-10.0)
+  - Number of pulses per revolution (1-66) - Sets the number of pulses detected per revolution. Can be the number of magnets used for a hall sensor, or the number of gear teeth on a gear if using a gear tooth sensor, or appropriate inductive sensor. 
+  - Gear ratio adjustment (0.1-10.0) for indirect measurement. I.E. a geared setup where you cannot measure on the final rotating component.
   - Decimal point display option
   - Adjustable low-pass filtering (0-10)
 - Auto-ranging display (decimal points for low RPM, integers for high RPM)
