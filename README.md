@@ -4,10 +4,10 @@ RP2040 Based OLED Tachometer for a Lathe, or any other rotating device.
 
 # Lathe Tachometer with Pi Pico
 
-A digital tachometer for lathes or other rotating device using a Raspberry Pi Pico microcontroller and SSD1306 OLED display. 
-The system uses a hall effect sensor, or other voltage output digital senssor type to measure rotation speed and displays RPM with configurable settings.
+A digital tachometer for lathes or other rotating devices using a Raspberry Pi Pico microcontroller and SSD1306 OLED display. 
+The system uses a hall effect sensor, or other voltage output digital sensor type to measure rotation speed and displays RPM with configurable settings.
 
-Sensor can be hall,optical, inductive etc.  Output mut be < 3.3v. If your sensor output is > 3.3v use a voltage divider on the output to the Pico input pin.
+Sensor can be hall,optical, inductive etc.  Output must be < 3.3v. If your sensor output is > 3.3v use a voltage divider on the output to the Pico input pin.
 
 ## Features
 
