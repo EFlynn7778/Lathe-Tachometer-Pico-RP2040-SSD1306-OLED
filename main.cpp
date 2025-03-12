@@ -50,6 +50,8 @@ typedef struct {
     float gear_ratio;            // Gear ratio multiplier
     bool show_decimal;           // Display decimal point or not
     uint8_t filter_strength;     // Filter strength (0-10, 0=no filtering)
+    float workpiece_diameter;    // Diameter of the workpiece
+    bool use_inches;             // true = inches, false = mm
 } tach_settings_t;
 
 #define SETTINGS_MAGIC 0xABCD1234 // Magic number to validate settings
@@ -60,7 +62,9 @@ enum MenuState {
     MENU_PULSES,
     MENU_RATIO,
     MENU_DECIMAL,
-    MENU_FILTER
+    MENU_FILTER,
+    MENU_DIAMETER,
+    MENU_UNITS
 };
 
 // Global variables
@@ -100,6 +104,29 @@ void save_settings(void);
 void display_rpm(void);
 void display_menu(void);
 void calculate_rpm(void);
+
+// Calculate surface speed based on RPM and workpiece diameter
+float calculate_surface_speed() {
+    // If RPM is 0 or very low, return 0 to avoid unnecessary calculations
+    if (current_rpm < 0.1f) {
+        return 0.0f;
+    }
+    
+    // Calculate surface speed
+    // For metric (mm): surface speed in m/min = RPM * diameter * π / 1000
+    // For imperial (inches): surface speed in ft/min = RPM * diameter * π / 12
+    
+    float surface_speed = 0.0f;
+    if (settings.use_inches) {
+        // Calculate surface speed in feet per minute for inches
+        surface_speed = current_rpm * settings.workpiece_diameter * 3.14159f / 12.0f;
+    } else {
+        // Calculate surface speed in meters per minute for mm
+        surface_speed = current_rpm * settings.workpiece_diameter * 3.14159f / 1000.0f;
+    }
+    
+    return surface_speed;
+}
 
 // ==================== Main ===================
 int main() 
@@ -277,6 +304,10 @@ void process_buttons() {
             current_menu = MENU_DECIMAL;
         } else if (current_menu == MENU_DECIMAL) {
             current_menu = MENU_FILTER;
+        } else if (current_menu == MENU_FILTER) {
+            current_menu = MENU_DIAMETER;
+        } else if (current_menu == MENU_DIAMETER) {
+            current_menu = MENU_UNITS;
         } else {
             current_menu = MENU_NONE;
             save_settings();
@@ -289,13 +320,11 @@ void process_buttons() {
         (current_time - button_down_press_time >= LONG_PRESS_TIME * 1000)) {
         button_down_long_press = true;
         
-        // Long press DOWN button exits menu
+        // Long press DOWN button exits menu or toggles diameter adjust mode
         if (current_menu != MENU_NONE) {
             current_menu = MENU_NONE;
             save_settings();
         }
-        
-        menu_last_activity = ms_time;
     }
     
     // Handle short presses (released after press but before long press)
@@ -304,8 +333,22 @@ void process_buttons() {
     
     if (!button_up_pressed && !button_up_handled) {
         if (current_time - button_up_press_time < LONG_PRESS_TIME * 1000) {
-            // Short press UP button - increment value in current menu
-            if (current_menu == MENU_PULSES) {
+            // Short press UP button - increment value in current menu or adjust diameter
+            if (current_menu == MENU_NONE) {
+                // Direct diameter adjustment from main screen
+                if (settings.use_inches) {
+                    settings.workpiece_diameter += 0.125f;  // 1/8" increments
+                    if (settings.workpiece_diameter > 12.0f) {  // Max 12 inches
+                        settings.workpiece_diameter = 0.125f;
+                    }
+                } else {
+                    settings.workpiece_diameter += 1.0f;  // 1mm increments
+                    if (settings.workpiece_diameter > 300.0f) {  // Max 300mm
+                        settings.workpiece_diameter = 1.0f;
+                    }
+                }
+                save_settings(); // Save immediately when changing diameter
+            } else if (current_menu == MENU_PULSES) {
                 settings.pulses_per_rev++;
                 if (settings.pulses_per_rev > 66) {  // Set reasonable max
                     settings.pulses_per_rev = 1;
@@ -322,6 +365,36 @@ void process_buttons() {
                 if (settings.filter_strength > 10) {  // 0-10 range
                     settings.filter_strength = 0;
                 }
+            } else if (current_menu == MENU_DIAMETER) {
+                // Increment by different amounts based on units
+                if (settings.use_inches) {
+                    settings.workpiece_diameter += 0.125f;  // 1/8" increments
+                    if (settings.workpiece_diameter > 12.0f) {  // Max 12 inches
+                        settings.workpiece_diameter = 0.125f;
+                    }
+                } else {
+                    settings.workpiece_diameter += 1.0f;  // 1mm increments
+                    if (settings.workpiece_diameter > 300.0f) {  // Max 300mm
+                        settings.workpiece_diameter = 1.0f;
+                    }
+                }
+            } else if (current_menu == MENU_UNITS) {
+                settings.use_inches = !settings.use_inches;
+                
+                // Convert diameter value when changing units
+                if (settings.use_inches) {
+                    // Convert mm to inches
+                    settings.workpiece_diameter /= 25.4f;
+                    // Round to nearest 1/8"
+                    settings.workpiece_diameter = roundf(settings.workpiece_diameter * 8.0f) / 8.0f;
+                    if (settings.workpiece_diameter < 0.125f) settings.workpiece_diameter = 0.125f;
+                } else {
+                    // Convert inches to mm
+                    settings.workpiece_diameter *= 25.4f;
+                    // Round to nearest mm
+                    settings.workpiece_diameter = roundf(settings.workpiece_diameter);
+                    if (settings.workpiece_diameter < 1.0f) settings.workpiece_diameter = 1.0f;
+                }
             }
             
             menu_last_activity = ms_time;
@@ -333,8 +406,24 @@ void process_buttons() {
     
     if (!button_down_pressed && !button_down_handled) {
         if (current_time - button_down_press_time < LONG_PRESS_TIME * 1000) {
-            // Short press DOWN button - decrement value in current menu
-            if (current_menu == MENU_PULSES) {
+            // Short press DOWN button - decrement value in current menu or adjust diameter
+            if (current_menu == MENU_NONE) {
+                // Direct diameter adjustment from main screen
+                if (settings.use_inches) {
+                    if (settings.workpiece_diameter <= 0.125f) {
+                        settings.workpiece_diameter = 12.0f;  // Max 12 inches
+                    } else {
+                        settings.workpiece_diameter -= 0.125f;  // 1/8" increments
+                    }
+                } else {
+                    if (settings.workpiece_diameter <= 1.0f) {
+                        settings.workpiece_diameter = 300.0f;  // Max 300mm
+                    } else {
+                        settings.workpiece_diameter -= 1.0f;  // 1mm increments
+                    }
+                }
+                save_settings(); // Save immediately when changing diameter
+            } else if (current_menu == MENU_PULSES) {
                 if (settings.pulses_per_rev <= 1) {
                     settings.pulses_per_rev = 66;
                 } else {
@@ -352,6 +441,38 @@ void process_buttons() {
                     settings.filter_strength = 10;
                 } else {
                     settings.filter_strength--;
+                }
+            } else if (current_menu == MENU_DIAMETER) {
+                // Decrement by different amounts based on units
+                if (settings.use_inches) {
+                    if (settings.workpiece_diameter <= 0.125f) {
+                        settings.workpiece_diameter = 12.0f;  // Max 12 inches
+                    } else {
+                        settings.workpiece_diameter -= 0.125f;  // 1/8" increments
+                    }
+                } else {
+                    if (settings.workpiece_diameter <= 1.0f) {
+                        settings.workpiece_diameter = 300.0f;  // Max 300mm
+                    } else {
+                        settings.workpiece_diameter -= 1.0f;  // 1mm increments
+                    }
+                }
+            } else if (current_menu == MENU_UNITS) {
+                settings.use_inches = !settings.use_inches;
+                
+                // Convert diameter value when changing units
+                if (settings.use_inches) {
+                    // Convert mm to inches
+                    settings.workpiece_diameter /= 25.4f;
+                    // Round to nearest 1/8"
+                    settings.workpiece_diameter = roundf(settings.workpiece_diameter * 8.0f) / 8.0f;
+                    if (settings.workpiece_diameter < 0.125f) settings.workpiece_diameter = 0.125f;
+                } else {
+                    // Convert inches to mm
+                    settings.workpiece_diameter *= 25.4f;
+                    // Round to nearest mm
+                    settings.workpiece_diameter = roundf(settings.workpiece_diameter);
+                    if (settings.workpiece_diameter < 1.0f) settings.workpiece_diameter = 1.0f;
                 }
             }
             
@@ -469,17 +590,40 @@ void display_rpm() {
     }
     
     // Show "RPM" label
-    myOLED.setFont(pFontWide);
-    myOLED.setCursor(90, 50);
-    myOLED.print("RPM");
+    myOLED.setFont(pFontDefault);
     
-    // Show pulse count in small font at bottom
-	myOLED.setFont(pFontDefault);
+    // Show surface speed in small font at bottom
     myOLED.setCursor(0, 56);
-    myOLED.print("P:");
-    myOLED.print(settings.pulses_per_rev);
-    myOLED.print(" R:");
-    myOLED.print(settings.gear_ratio, 1);
+    
+    // Calculate and display surface speed
+    float surface_speed = calculate_surface_speed();
+    
+    // Show diameter and surface speed
+    myOLED.print("D:");
+    
+    if (settings.use_inches) {
+        myOLED.print(settings.workpiece_diameter);
+        myOLED.print("\" ");
+        
+        // Surface speed in ft/min for inch units
+        myOLED.print("SFM:");
+        if (surface_speed < 10) {
+            myOLED.print(surface_speed, 1); // One decimal place for small values
+        } else {
+            myOLED.print((int)surface_speed); // Integer for larger values
+        }
+    } else {
+        myOLED.print(settings.workpiece_diameter);
+        myOLED.print("mm ");
+        
+        // Surface speed in m/min for metric units
+        myOLED.print("m/min:");
+        if (surface_speed < 10) {
+            myOLED.print(surface_speed, 1); // One decimal place for small values
+        } else {
+            myOLED.print((int)surface_speed); // Integer for larger values
+        }
+    }
 }
 
 // Display the settings menu
@@ -549,6 +693,42 @@ void display_menu() {
             myOLED.print(settings.filter_strength);
             break;
             
+        case MENU_DIAMETER:
+            myOLED.setCursor(0, 16);
+            myOLED.print("  Pulses per rev: ");
+            myOLED.print(settings.pulses_per_rev);
+            myOLED.setCursor(0, 24);
+            myOLED.print("  Gear ratio: ");
+            myOLED.print(settings.gear_ratio, 1);
+            myOLED.setCursor(0, 32);
+            myOLED.print("  Show decimal: ");
+            myOLED.print(settings.show_decimal ? "Yes" : "No");
+            myOLED.setCursor(0, 40);
+            myOLED.print("> Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            break;
+
+        case MENU_UNITS:
+            myOLED.setCursor(0, 16);
+            myOLED.print("  Pulses per rev: ");
+            myOLED.print(settings.pulses_per_rev);
+            myOLED.setCursor(0, 24);
+            myOLED.print("  Gear ratio: ");
+            myOLED.print(settings.gear_ratio, 1);
+            myOLED.setCursor(0, 32);
+            myOLED.print("  Show decimal: ");
+            myOLED.print(settings.show_decimal ? "Yes" : "No");
+            myOLED.setCursor(0, 40);
+            myOLED.print("> Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "mm");
+            break;
+            
         default:
             break;
     }
@@ -572,6 +752,8 @@ void load_settings() {
         settings.gear_ratio = 1.0f;
         settings.show_decimal = true;
         settings.filter_strength = 3; // Default medium filtering
+        settings.workpiece_diameter = 25.0f; // Default 25mm (about 1 inch)
+        settings.use_inches = false; // Default to metric
         
         // Save default settings
         save_settings();
