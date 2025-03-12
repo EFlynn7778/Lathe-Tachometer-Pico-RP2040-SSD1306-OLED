@@ -1,6 +1,10 @@
 # Lathe-Tachometer-Pico-RP2040-SSD1306-OLED
 RP2040 Based OLED Tachometer for a Lathe, or any other rotating device.
 
+Added Surface Speed calculation and display.  Units (in/mm) can be set in the menu. UP/DOWN button directly change the workpiece diameter on the main display.
+
+SFM or m/min diplayed according to unit selection. 
+
 
 # Lathe Tachometer with Pi Pico
 
