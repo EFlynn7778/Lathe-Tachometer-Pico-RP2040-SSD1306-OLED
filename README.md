@@ -31,7 +31,7 @@ Sensor can be hall,optical, inductive etc.  Output must be < 3.3v. If your senso
 - Raspberry Pi Pico
 - SSD1306 128x64 OLED Display (I2C)
 - Hall Effect Sensor or any other sensor capbable of sending a pulse
-- 2 Push Buttons
+- 3 Push Buttons
 - Pull-up Resistors for Buttons
 
 ## Pin Connections - Change to match your hardware
@@ -39,10 +39,11 @@ Sensor can be hall,optical, inductive etc.  Output must be < 3.3v. If your senso
 - **I2C Display:**
   - SDA: GPIO 6
   - SCL: GPIO 7
-- **Hall Sensor:** GPIO 29
+- **Hall Sensor:** GPIO 12
 - **Buttons:**
-  - UP: GPIO 1
-  - DOWN: GPIO 2
+  - UP: GPIO 10
+  - DOWN: GPIO 11
+  - MENU: GPIO 9
 
 ## Usage
 
