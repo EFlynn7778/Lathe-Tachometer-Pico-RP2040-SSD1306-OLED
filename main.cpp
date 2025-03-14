@@ -22,10 +22,9 @@ uint8_t screenBuffer[myScreenSize]; // Define a buffer to cover whole screen  12
 
 // Display timing parameters
 #define DISPLAY_UPDATE_INTERVAL 100  // Update display every 100ms (was 250ms)
-#define MENU_TIMEOUT 10000          // Exit menu after 10 seconds of inactivity
-#define RPM_TIMEOUT_MS 500          // Timeout for zero RPM (was 3000000us = 3000ms)
+#define MENU_TIMEOUT 5000          // Exit menu after 5 seconds of inactivity
+#define RPM_TIMEOUT_MS 500          // Timeout for zero RPM
 #define RPM_TIMEOUT_CHECK_MS 100    // Check for timeout every 100ms (was 1000ms)
-#define FLASH_PAGE_SIZE   256
 
 // I2C settings
 const uint16_t I2C_Speed = 1000;
@@ -34,9 +33,10 @@ const uint8_t I2C_GPIO_DATA = 6;
 
 // Hall sensor and button settings
 const uint8_t HALL_SENSOR_PIN = 12;    // GPIO pin for hall sensor input
-const uint8_t BUTTON_UP_PIN = 1;      // GPIO pin for UP button
-const uint8_t BUTTON_DOWN_PIN = 2;    // GPIO pin for DOWN button
-const uint32_t DEBOUNCE_DELAY = 50;    // Button debounce delay (ms)
+const uint8_t BUTTON_UP_PIN = 10;      // GPIO pin for UP button
+const uint8_t BUTTON_DOWN_PIN = 11;    // GPIO pin for DOWN button
+const uint8_t BUTTON_MENU_PIN = 9;     // GPIO pin for MENU button
+const uint32_t DEBOUNCE_DELAY = 100;    // Button debounce delay (ms)
 const uint32_t LONG_PRESS_TIME = 1000; // Long press detection time (ms)
 
 // Settings storage
@@ -86,6 +86,15 @@ volatile uint64_t button_down_press_time = 0;
 volatile bool button_up_long_press = false;
 volatile bool button_down_long_press = false;
 
+// Add more state tracking for menu button
+volatile bool button_menu_pressed = false;
+volatile uint64_t button_menu_press_time = 0;
+volatile bool button_menu_handled = false;
+const uint32_t MENU_DEBOUNCE_MS = 200;  // Reduced from 400ms for more responsive menu navigation
+
+// Add menu button long press tracking
+volatile bool button_menu_long_press = false;
+
 // UI state
 MenuState current_menu = MENU_NONE;
 uint32_t menu_last_activity = 0;
@@ -95,6 +104,25 @@ SSD1306 myOLED(myOLEDwidth, myOLEDheight);
 
 // GPIO interrupt handler
 void gpio_callback(uint gpio, uint32_t events);
+
+// Convert diameter when switching between metric and imperial units
+void convert_diameter_units(bool from_inches_to_mm) {
+    if (from_inches_to_mm) {
+        // Converting from inches to mm
+        settings.workpiece_diameter *= 25.4f;
+        // Round to nearest mm
+        settings.workpiece_diameter = roundf(settings.workpiece_diameter);
+        if (settings.workpiece_diameter < 1.0f) settings.workpiece_diameter = 1.0f;
+        if (settings.workpiece_diameter > 300.0f) settings.workpiece_diameter = 300.0f;
+    } else {
+        // Converting from mm to inches
+        settings.workpiece_diameter /= 25.4f;
+        // Round to nearest 1/8"
+        settings.workpiece_diameter = roundf(settings.workpiece_diameter * 8.0f) / 8.0f;
+        if (settings.workpiece_diameter < 0.125f) settings.workpiece_diameter = 0.125f;
+        if (settings.workpiece_diameter > 12.0f) settings.workpiece_diameter = 12.0f;
+    }
+}
 
 // =============== Function prototypes ================
 void setup(void);
@@ -112,20 +140,17 @@ float calculate_surface_speed() {
         return 0.0f;
     }
     
-    // Calculate surface speed
-    // For metric (mm): surface speed in m/min = RPM * diameter * π / 1000
-    // For imperial (inches): surface speed in ft/min = RPM * diameter * π / 12
-    
-    float surface_speed = 0.0f;
+    float diameter_inches;
     if (settings.use_inches) {
-        // Calculate surface speed in feet per minute for inches
-        surface_speed = current_rpm * settings.workpiece_diameter * 3.14159f / 12.0f;
+        diameter_inches = settings.workpiece_diameter;
     } else {
-        // Calculate surface speed in meters per minute for mm
-        surface_speed = current_rpm * settings.workpiece_diameter * 3.14159f / 1000.0f;
+        // Convert mm to inches for SFM calculation
+        diameter_inches = settings.workpiece_diameter / 25.4f;
     }
     
-    return surface_speed;
+    // Calculate surface speed in feet per minute (SFM)
+    // SFM = π * diameter (inches) * RPM / 12
+    return (3.14159f * diameter_inches * current_rpm) / 12.0f;
 }
 
 // ==================== Main ===================
@@ -204,7 +229,7 @@ void gpio_callback(uint gpio, uint32_t events) {
         }
     }
     
-    // Process button interrupts
+    // Process button interrupts - only capture press/release events
     uint64_t current_time = time_us_64();
     if (gpio == BUTTON_UP_PIN) {
         if (events & GPIO_IRQ_EDGE_FALL) {  // Button pressed
@@ -221,6 +246,19 @@ void gpio_callback(uint gpio, uint32_t events) {
             button_down_long_press = false;
         } else if (events & GPIO_IRQ_EDGE_RISE) {  // Button released
             button_down_pressed = false;
+        }
+    } else if (gpio == BUTTON_MENU_PIN) {
+        if (events & GPIO_IRQ_EDGE_FALL) {  // Button pressed
+            // Simple debounce check
+            if (current_time - button_menu_press_time < MENU_DEBOUNCE_MS * 1000) {
+                return;  // Ignore this press as it's too soon after the last one
+            }
+            
+            button_menu_press_time = current_time;
+            button_menu_pressed = true;
+            button_menu_long_press = false;
+        } else if (events & GPIO_IRQ_EDGE_RISE) {  // Button released
+            button_menu_pressed = false;
         }
     }
 }
@@ -263,15 +301,20 @@ void setup()
     gpio_init(BUTTON_DOWN_PIN);
     gpio_set_dir(BUTTON_DOWN_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_DOWN_PIN);
+
+    gpio_init(BUTTON_MENU_PIN);
+    gpio_set_dir(BUTTON_MENU_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_MENU_PIN);
     
     // Configure GPIO interrupts for hall sensor and buttons
     gpio_set_irq_enabled_with_callback(HALL_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_callback);
     gpio_set_irq_enabled(BUTTON_UP_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(BUTTON_DOWN_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(BUTTON_MENU_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
 
     // Display welcome message
     myOLED.setFont(pFontWide);
-    myOLED.setCursor(0, 0);
+    myOLED.setCursor(15, 0);
     myOLED.print("LATHE TACH");
 	myOLED.setFont(pFontDefault);
     myOLED.setCursor(0, 16);
@@ -280,6 +323,12 @@ void setup()
     myOLED.setCursor(0, 24);
     myOLED.print("Ratio: ");
     myOLED.print(settings.gear_ratio, 2);
+    myOLED.setCursor(0, 32);
+    myOLED.print("Diameter: ");
+    myOLED.print(settings.workpiece_diameter, 2);
+    myOLED.setCursor(0, 40);
+    myOLED.print("Unit: ");
+    myOLED.print(settings.use_inches ? "Inch" : "Metric");
     myOLED.OLEDupdate();
     busy_wait_ms(2000);
     myOLED.OLEDclearBuffer();
@@ -295,25 +344,8 @@ void process_buttons() {
         (current_time - button_up_press_time >= LONG_PRESS_TIME * 1000)) {
         button_up_long_press = true;
         
-        // Long press UP button enters/cycles through menu
-        if (current_menu == MENU_NONE) {
-            current_menu = MENU_PULSES;
-        } else if (current_menu == MENU_PULSES) {
-            current_menu = MENU_RATIO;
-        } else if (current_menu == MENU_RATIO) {
-            current_menu = MENU_DECIMAL;
-        } else if (current_menu == MENU_DECIMAL) {
-            current_menu = MENU_FILTER;
-        } else if (current_menu == MENU_FILTER) {
-            current_menu = MENU_DIAMETER;
-        } else if (current_menu == MENU_DIAMETER) {
-            current_menu = MENU_UNITS;
-        } else {
-            current_menu = MENU_NONE;
-            save_settings();
-        }
-        
-        menu_last_activity = ms_time;
+        // Long press UP functionality can be used for other purposes if needed
+        // Currently not used as menu navigation is handled by MENU button
     }
     
     if (button_down_pressed && !button_down_long_press && 
@@ -326,10 +358,23 @@ void process_buttons() {
             save_settings();
         }
     }
+
+    // Check for menu button long press
+    if (button_menu_pressed && !button_menu_long_press && 
+        (current_time - button_menu_press_time >= LONG_PRESS_TIME * 1000)) {
+        button_menu_long_press = true;
+        
+        // Exit menu and save settings on long press
+        if (current_menu != MENU_NONE) {
+            current_menu = MENU_NONE;
+            save_settings();
+        }
+    }
     
     // Handle short presses (released after press but before long press)
     static bool button_up_handled = false;
     static bool button_down_handled = false;
+    static bool button_menu_handled = false;
     
     if (!button_up_pressed && !button_up_handled) {
         if (current_time - button_up_press_time < LONG_PRESS_TIME * 1000) {
@@ -379,21 +424,12 @@ void process_buttons() {
                     }
                 }
             } else if (current_menu == MENU_UNITS) {
-                settings.use_inches = !settings.use_inches;
-                
-                // Convert diameter value when changing units
-                if (settings.use_inches) {
-                    // Convert mm to inches
-                    settings.workpiece_diameter /= 25.4f;
-                    // Round to nearest 1/8"
-                    settings.workpiece_diameter = roundf(settings.workpiece_diameter * 8.0f) / 8.0f;
-                    if (settings.workpiece_diameter < 0.125f) settings.workpiece_diameter = 0.125f;
-                } else {
-                    // Convert inches to mm
-                    settings.workpiece_diameter *= 25.4f;
-                    // Round to nearest mm
-                    settings.workpiece_diameter = roundf(settings.workpiece_diameter);
-                    if (settings.workpiece_diameter < 1.0f) settings.workpiece_diameter = 1.0f;
+                // Toggle units setting (UP button = switch to inches if not already)
+                if (!settings.use_inches) {
+                    settings.use_inches = true;
+                    convert_diameter_units(false); // Convert from mm to inches
+                    printf("UP: Units changed to inches\n");
+                    save_settings();
                 }
             }
             
@@ -458,21 +494,12 @@ void process_buttons() {
                     }
                 }
             } else if (current_menu == MENU_UNITS) {
-                settings.use_inches = !settings.use_inches;
-                
-                // Convert diameter value when changing units
+                // Toggle units setting (DOWN button = switch to mm if not already)
                 if (settings.use_inches) {
-                    // Convert mm to inches
-                    settings.workpiece_diameter /= 25.4f;
-                    // Round to nearest 1/8"
-                    settings.workpiece_diameter = roundf(settings.workpiece_diameter * 8.0f) / 8.0f;
-                    if (settings.workpiece_diameter < 0.125f) settings.workpiece_diameter = 0.125f;
-                } else {
-                    // Convert inches to mm
-                    settings.workpiece_diameter *= 25.4f;
-                    // Round to nearest mm
-                    settings.workpiece_diameter = roundf(settings.workpiece_diameter);
-                    if (settings.workpiece_diameter < 1.0f) settings.workpiece_diameter = 1.0f;
+                    settings.use_inches = false;
+                    convert_diameter_units(true); // Convert from inches to mm
+                    printf("DOWN: Units changed to metric\n");
+                    save_settings();
                 }
             }
             
@@ -481,6 +508,46 @@ void process_buttons() {
         button_down_handled = true;
     } else if (button_down_pressed) {
         button_down_handled = false;
+    }
+
+    // Handle menu button press
+    if (!button_menu_pressed && !button_menu_handled) {
+        if (current_time - button_menu_press_time < LONG_PRESS_TIME * 1000) {
+            // Short press MENU button - navigate through menu or enter menu
+            if (current_menu == MENU_NONE) {
+                // Enter menu from main screen
+                current_menu = MENU_PULSES;
+            } else {
+                // Menu navigation logic - cycle through menu items
+                switch (current_menu) {
+                    case MENU_PULSES:
+                        current_menu = MENU_RATIO;
+                        break;
+                    case MENU_RATIO:
+                        current_menu = MENU_DECIMAL;
+                        break;
+                    case MENU_DECIMAL:
+                        current_menu = MENU_FILTER;
+                        break;
+                    case MENU_FILTER:
+                        current_menu = MENU_DIAMETER;
+                        break;
+                    case MENU_DIAMETER:
+                        current_menu = MENU_UNITS;
+                        break;
+                    case MENU_UNITS:
+                        current_menu = MENU_PULSES;  // Cycle back to first menu item
+                        break;
+                    default:
+                        current_menu = MENU_PULSES;
+                }
+            }
+            
+            menu_last_activity = ms_time;
+        }
+        button_menu_handled = true;
+    } else if (button_menu_pressed) {
+        button_menu_handled = false;
     }
 }
 
@@ -589,14 +656,10 @@ void display_rpm() {
         myOLED.print("HIGH RPM");
     }
     
-    // Show "RPM" label
     myOLED.setFont(pFontDefault);
     
     // Show surface speed in small font at bottom
-    myOLED.setCursor(0, 56);
-    
-    // Calculate and display surface speed
-    float surface_speed = calculate_surface_speed();
+    myOLED.setCursor(1, 56);
     
     // Show diameter and surface speed
     myOLED.print("D:");
@@ -604,105 +667,147 @@ void display_rpm() {
     if (settings.use_inches) {
         myOLED.print(settings.workpiece_diameter);
         myOLED.print("\" ");
-        
-        // Surface speed in ft/min for inch units
-        myOLED.print("SFM:");
-        if (surface_speed < 10) {
-            myOLED.print(surface_speed, 1); // One decimal place for small values
-        } else {
-            myOLED.print((int)surface_speed); // Integer for larger values
-        }
     } else {
         myOLED.print(settings.workpiece_diameter);
         myOLED.print("mm ");
-        
-        // Surface speed in m/min for metric units
-        myOLED.print("m/min:");
-        if (surface_speed < 10) {
-            myOLED.print(surface_speed, 1); // One decimal place for small values
-        } else {
-            myOLED.print((int)surface_speed); // Integer for larger values
-        }
+    }
+    
+    // Always show surface speed in SFM
+    myOLED.print("SFM:");
+    float surface_speed = calculate_surface_speed();
+    if (surface_speed < 10) {
+        myOLED.print(surface_speed, 1); // One decimal place for small values
+    } else {
+        myOLED.print((int)surface_speed); // Integer for larger values
     }
 }
 
 // Display the settings menu
 void display_menu() {
     myOLED.setFont(pFontDefault);
-    myOLED.setCursor(0, 0);
-    myOLED.print("SETTINGS");
     
     switch (current_menu) {
         case MENU_PULSES:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("> Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("  Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("  Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
-            myOLED.setCursor(0, 40);
+            myOLED.setCursor(0, 30);
             myOLED.print("  Filter: ");
             myOLED.print(settings.filter_strength);
+            myOLED.setCursor(0, 40);
+            myOLED.print("  Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            myOLED.setCursor(0, 50);
+            myOLED.print("  Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
             
         case MENU_RATIO:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("  Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("> Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("  Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
-            myOLED.setCursor(0, 40);
+            myOLED.setCursor(0, 30);
             myOLED.print("  Filter: ");
             myOLED.print(settings.filter_strength);
+            myOLED.setCursor(0, 40);
+            myOLED.print("  Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            myOLED.setCursor(0, 50);
+            myOLED.print("  Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
             
         case MENU_DECIMAL:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("  Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("  Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("> Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
-            myOLED.setCursor(0, 40);
+            myOLED.setCursor(0, 30);
             myOLED.print("  Filter: ");
             myOLED.print(settings.filter_strength);
+            myOLED.setCursor(0, 40);
+            myOLED.print("  Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            myOLED.setCursor(0, 50);
+            myOLED.print("  Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
             
         case MENU_FILTER:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("  Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("  Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("  Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
-            myOLED.setCursor(0, 40);
+            myOLED.setCursor(0, 30);
             myOLED.print("> Filter: ");
             myOLED.print(settings.filter_strength);
+            myOLED.setCursor(0, 40);
+            myOLED.print("  Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            myOLED.setCursor(0, 50);
+            myOLED.print("  Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
             
         case MENU_DIAMETER:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("  Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("  Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("  Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
+            myOLED.setCursor(0, 30);
+            myOLED.print("  Filter: ");
+            myOLED.print(settings.filter_strength);
             myOLED.setCursor(0, 40);
             myOLED.print("> Diameter: ");
             if (settings.use_inches) {
@@ -712,30 +817,41 @@ void display_menu() {
                 myOLED.print(settings.workpiece_diameter);
                 myOLED.print("mm");
             }
+            myOLED.setCursor(0, 50);
+            myOLED.print("  Units: ");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
 
         case MENU_UNITS:
-            myOLED.setCursor(0, 16);
+            myOLED.setCursor(0, 0);
             myOLED.print("  Pulses per rev: ");
             myOLED.print(settings.pulses_per_rev);
-            myOLED.setCursor(0, 24);
+            myOLED.setCursor(0, 10);
             myOLED.print("  Gear ratio: ");
             myOLED.print(settings.gear_ratio, 1);
-            myOLED.setCursor(0, 32);
+            myOLED.setCursor(0, 20);
             myOLED.print("  Show decimal: ");
             myOLED.print(settings.show_decimal ? "Yes" : "No");
+            myOLED.setCursor(0, 30);
+            myOLED.print("  Filter: ");
+            myOLED.print(settings.filter_strength);
             myOLED.setCursor(0, 40);
+            myOLED.print("  Diameter: ");
+            if (settings.use_inches) {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("\"");
+            } else {
+                myOLED.print(settings.workpiece_diameter);
+                myOLED.print("mm");
+            }
+            myOLED.setCursor(0, 50);
             myOLED.print("> Units: ");
-            myOLED.print(settings.use_inches ? "Inches" : "mm");
+            myOLED.print(settings.use_inches ? "Inches" : "Metric");
             break;
             
         default:
             break;
     }
-    
-    // Instructions at the bottom
-    myOLED.setCursor(0, 56);
-    myOLED.print("Short: +/- Long: Next/Exit");
 }
 
 // Load settings from flash
@@ -762,6 +878,9 @@ void load_settings() {
 
 // Save settings to flash
 void save_settings() {
+    printf("save_settings Called: use_inches=%d, workpiece_diameter=%.2f\n", 
+           settings.use_inches, settings.workpiece_diameter);
+
     // Data must be a multiple of 256 bytes for flash operations
     uint8_t data[FLASH_PAGE_SIZE];
     
@@ -781,7 +900,7 @@ void save_settings() {
     
     // Program flash page
     flash_range_program(FLASH_TARGET_OFFSET, data, FLASH_PAGE_SIZE);
-    
+
     // Restore interrupts
     restore_interrupts(ints);
 }
